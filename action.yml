@@ -1,0 +1,101 @@
+# Surfacedd agent readiness check (SPEC §2.9 F93). Published as surfacedd/agent-readiness-action.
+# Installs the free surfacedd-check binary (SHA-256 verified), checks one URL with the same rules and
+# scores as the Surfacedd app, writes a job summary and fails the step under `fail-under`.
+name: Surfacedd agent readiness check
+description: Check whether AI agents can reach, understand and act on your site. Free, local, no account. Fails under a score you set.
+author: Surfacedd
+branding:
+  icon: check-circle
+  color: gray-dark
+
+inputs:
+  url:
+    description: The page to start from, e.g. https://staging.example.com or http://localhost:3000.
+    required: true
+  fail-under:
+    description: Fail the step when the overall score (0–100) is under this number. Empty = never fail on the score.
+    required: false
+    default: ""
+  max-pages:
+    description: Pages to crawl (1–500). robots.txt is respected.
+    required: false
+    default: "50"
+  allow-private:
+    description: Set to "true" to check a local or private address (a site started earlier in the job).
+    required: false
+    default: "false"
+  version:
+    description: surfacedd-check release tag, e.g. v1.0.0, or "latest".
+    required: false
+    default: latest
+  summary:
+    description: Set to "false" to skip the job summary.
+    required: false
+    default: "true"
+
+outputs:
+  score:
+    description: Overall score 0–100 (empty when no rule applied).
+    value: ${{ steps.check.outputs.score }}
+  reach:
+    description: Reach score.
+    value: ${{ steps.check.outputs.reach }}
+  understand:
+    description: Understand score.
+    value: ${{ steps.check.outputs.understand }}
+  act:
+    description: Act score.
+    value: ${{ steps.check.outputs.act }}
+  passed:
+    description: '"true" or "false" against fail-under.'
+    value: ${{ steps.check.outputs.passed }}
+  problems:
+    description: Number of scored rules with problems.
+    value: ${{ steps.check.outputs.problems }}
+  report:
+    description: Path of the JSON report (schema surfacedd.cli/v1).
+    value: ${{ steps.check.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install surfacedd-check
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        DIR: ${{ runner.temp }}/surfacedd-check
+      run: |
+        set -euo pipefail
+        if [ -n "${SURFACEDD_CHECK_BASE_URL:-}" ]; then
+          src="${SURFACEDD_CHECK_BASE_URL%/}/install-check.sh"
+        elif [ "$VERSION" = latest ]; then
+          src="https://github.com/surfacedd/surfacedd-releases/releases/latest/download/install-check.sh"
+        else
+          v="$VERSION"; case "$v" in v*) ;; *) v="v$v" ;; esac
+          src="https://github.com/surfacedd/surfacedd-releases/releases/download/$v/install-check.sh"
+        fi
+        curl -fsSL --retry 3 "$src" -o "$RUNNER_TEMP/install-check.sh"
+        sh "$RUNNER_TEMP/install-check.sh" --version "$VERSION" --dir "$DIR"
+        echo "$DIR" >> "$GITHUB_PATH"
+
+    - name: Check agent readiness
+      id: check
+      shell: bash
+      env:
+        URL: ${{ inputs.url }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        MAX_PAGES: ${{ inputs.max-pages }}
+        ALLOW_PRIVATE: ${{ inputs.allow-private }}
+        SUMMARY: ${{ inputs.summary }}
+        BIN: ${{ runner.temp }}/surfacedd-check/surfacedd-check
+      run: |
+        # The runner's bash has -e on; the exit code is the result, so read it instead of aborting.
+        set +e -u
+        args=(agent-readiness check "$URL" --json --max-pages "$MAX_PAGES")
+        [ -n "$FAIL_UNDER" ] && args+=(--fail-under "$FAIL_UNDER")
+        [ "$ALLOW_PRIVATE" = true ] && args+=(--allow-private)
+        report="$RUNNER_TEMP/agent-readiness.json"
+        "$BIN" "${args[@]}" > "$report"
+        code=$?
+        node "$GITHUB_ACTION_PATH/summary.mjs" "$report" "$code"
+        exit $code
